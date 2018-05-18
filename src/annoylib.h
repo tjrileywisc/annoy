@@ -188,8 +188,10 @@ inline T get_norm(T* v, int f) {
 template<typename T>
 inline void normalize(T* v, int f) {
   T norm = get_norm(v, f);
-  for (int z = 0; z < f; z++)
-    v[z] /= norm;
+  if (norm > 0) {
+    for (int z = 0; z < f; z++)
+      v[z] /= norm;
+  }
 }
 
 template<typename T, typename Random, typename Distance, typename Node>
@@ -218,6 +220,9 @@ inline void two_means(const vector<Node*>& nodes, int f, Random& random, bool co
     T di = ic * Distance::distance(p, nodes[k], f),
       dj = jc * Distance::distance(q, nodes[k], f);
     T norm = cosine ? get_norm(nodes[k]->v, f) : 1.0;
+    if (!(norm > T(0))) {
+      continue;
+    }
     if (di < dj) {
       for (int z = 0; z < f; z++)
 	p->v[z] = (p->v[z] * ic + nodes[k]->v[z] / norm) / (ic + 1);
@@ -336,7 +341,7 @@ struct Hamming {
 
   template<typename T>
   static inline T pq_initial_value() {
-    return 0;
+    return numeric_limits<T>::max();
   }
   template<typename S, typename T>
   static inline T distance(const Node<S, T>* x, const Node<S, T>* y, int f) {
@@ -360,9 +365,10 @@ struct Hamming {
   static inline void create_split(const vector<Node<S, T>*>& nodes, int f, size_t s, Random& random, Node<S, T>* n) {
     size_t cur_size = 0;
     size_t i = 0;
+    int dim = f * 8 * sizeof(T);
     for (; i < max_iterations; i++) {
       // choose random position to split at
-      n->v[0] = random.index(f);
+      n->v[0] = random.index(dim);
       cur_size = 0;
       for (typename vector<Node<S, T>*>::const_iterator it = nodes.begin(); it != nodes.end(); ++it) {
         if (margin(n, (*it)->v, f)) {
@@ -376,7 +382,7 @@ struct Hamming {
     // brute-force search for splitting coordinate
     if (i == max_iterations) {
       int j = 0;
-      for (; j < f; j++) {
+      for (; j < dim; j++) {
         n->v[0] = j;
         cur_size = 0;
 	for (typename vector<Node<S, T>*>::const_iterator it = nodes.begin(); it != nodes.end(); ++it) {
@@ -750,14 +756,19 @@ protected:
   }
 
   S _make_tree(const vector<S >& indices, bool is_root) {
+    // The basic rule is that if we have <= _K items, then it's a leaf node, otherwise it's a split node.
+    // There's some regrettable complications caused by the problem that root nodes have to be "special":
+    // 1. We identify root nodes by the arguable logic that _n_items == n->n_descendants, regardless of how many descendants they actually have
+    // 2. Root nodes with only 1 child need to be a "dummy" parent
+    // 3. Due to the _n_items "hack", we need to be careful with the cases where _n_items <= _K or _n_items > _K
     if (indices.size() == 1 && !is_root)
       return indices[0];
 
-    if (indices.size() <= (size_t)_K) {
+    if (indices.size() <= (size_t)_K && (!is_root || _n_items <= (size_t)_K || indices.size() == 1)) {
       _allocate_size(_n_nodes + 1);
       S item = _n_nodes++;
       Node* m = _get(item);
-      m->n_descendants = (S)indices.size();
+      m->n_descendants = is_root ? _n_items : (S)indices.size();
 
       // Using std::copy instead of a loop seems to resolve issues #3 and #13,
       // probably because gcc 4.8 goes overboard with optimizations.
@@ -808,7 +819,7 @@ protected:
 
     int flip = (children_indices[0].size() > children_indices[1].size());
 
-    m->n_descendants = (S)indices.size();
+    m->n_descendants = is_root ? _n_items : (S)indices.size();
     for (int side = 0; side < 2; side++)
       // run _make_tree for the smallest child first (for cache locality)
       m->children[side^flip] = _make_tree(children_indices[side^flip], false);
@@ -864,7 +875,8 @@ protected:
       if (j == last)
         continue;
       last = j;
-      nns_dist.push_back(make_pair(D::distance(v_node, _get(j), _f), j));
+      if (_get(j)->n_descendants == 1)  // This is only to guard a really obscure case, #284
+	nns_dist.push_back(make_pair(D::distance(v_node, _get(j), _f), j));
     }
 
     size_t m = nns_dist.size();
